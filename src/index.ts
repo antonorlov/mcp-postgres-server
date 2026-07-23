@@ -9,7 +9,9 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import pg from 'pg';
 const { Client } = pg;
+import { Client as SshClient, type ConnectConfig, type ClientChannel } from 'ssh2';
 import { config } from 'dotenv';
+import { readFileSync } from 'node:fs';
 
 // Load environment variables
 config();
@@ -20,6 +22,16 @@ interface DatabaseConfig {
   user: string;
   password: string;
   database: string;
+}
+
+interface SshTunnelConfig {
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  privateKey?: string;
+  passphrase?: string;
+  hostFingerprint?: string;
 }
 
 // Type guard for error objects
@@ -50,6 +62,8 @@ class PostgresServer {
   private server: Server;
   private client: pg.Client | null = null;
   private config: DatabaseConfig | null = null;
+  private sshClient: SshClient | null = null;
+  private sshConfig: SshTunnelConfig | null = null;
 
   constructor() {
     this.server = new Server(
@@ -84,6 +98,11 @@ class PostgresServer {
   private async cleanup() {
     if (this.client) {
       await this.client.end();
+      this.client = null;
+    }
+    if (this.sshClient) {
+      this.sshClient.end();
+      this.sshClient = null;
     }
     await this.server.close();
   }
@@ -95,6 +114,7 @@ class PostgresServer {
       
       if (envConfig) {
         this.config = envConfig;
+        this.sshConfig = this.getSshConfig();
         console.error('[MCP Info] Using database config from environment variables');
       } else {
         throw new McpError(
@@ -106,9 +126,16 @@ class PostgresServer {
 
     if (!this.client) {
       try {
-        this.client = new Client(this.config);
+        const stream = this.sshConfig
+          ? await this.createSshStream(this.config.host, this.config.port)
+          : undefined;
+        this.client = new Client({ ...this.config, ...(stream ? { stream: () => stream } : {}) });
         await this.client.connect();
       } catch (error) {
+        if (this.sshClient) {
+          this.sshClient.end();
+          this.sshClient = null;
+        }
         throw new McpError(
           ErrorCode.InternalError,
           `Failed to connect to database: ${getErrorMessage(error)}`
@@ -131,6 +158,95 @@ class PostgresServer {
     }
     
     return null;
+  }
+
+  private getSshConfig(): SshTunnelConfig | null {
+    const {
+      SSH_HOST,
+      SSH_PORT,
+      SSH_USER,
+      SSH_PASSWORD,
+      SSH_PRIVATE_KEY,
+      SSH_PRIVATE_KEY_PATH,
+      SSH_PRIVATE_KEY_PASSPHRASE,
+      SSH_HOST_FINGERPRINT,
+    } = process.env;
+
+    const hasSshConfiguration = [
+      SSH_HOST,
+      SSH_PORT,
+      SSH_USER,
+      SSH_PASSWORD,
+      SSH_PRIVATE_KEY,
+      SSH_PRIVATE_KEY_PATH,
+      SSH_PRIVATE_KEY_PASSPHRASE,
+      SSH_HOST_FINGERPRINT,
+    ].some(Boolean);
+    if (!hasSshConfiguration) {
+      return null;
+    }
+
+    if (!SSH_HOST || !SSH_USER) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        'SSH tunnel configuration requires both SSH_HOST and SSH_USER'
+      );
+    }
+
+    const port = SSH_PORT ? parseInt(SSH_PORT, 10) : 22;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new McpError(ErrorCode.InvalidRequest, 'SSH_PORT must be a valid TCP port');
+    }
+
+    const privateKey = SSH_PRIVATE_KEY || (SSH_PRIVATE_KEY_PATH ? readFileSync(SSH_PRIVATE_KEY_PATH, 'utf8') : undefined);
+    if (!SSH_PASSWORD && !privateKey) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        'SSH tunnel configuration requires SSH_PASSWORD, SSH_PRIVATE_KEY, or SSH_PRIVATE_KEY_PATH'
+      );
+    }
+
+    return {
+      host: SSH_HOST,
+      port,
+      username: SSH_USER,
+      password: SSH_PASSWORD,
+      privateKey,
+      passphrase: SSH_PRIVATE_KEY_PASSPHRASE,
+      hostFingerprint: SSH_HOST_FINGERPRINT,
+    };
+  }
+
+  private async createSshStream(destinationHost: string, destinationPort: number): Promise<ClientChannel> {
+    if (!this.sshConfig) {
+      throw new Error('SSH tunnel configuration is not set');
+    }
+
+    const { host, port, username, password, privateKey, passphrase, hostFingerprint } = this.sshConfig;
+    const sshOptions: ConnectConfig = { host, port, username, password, privateKey, passphrase };
+    if (hostFingerprint) {
+      sshOptions.hostHash = 'sha256';
+      sshOptions.hostVerifier = (hash: string) => hash === hostFingerprint.replace(/^SHA256:/, '');
+    } else {
+      console.error('[MCP Warning] SSH_HOST_FINGERPRINT is not set; the SSH host key will not be verified');
+    }
+
+    this.sshClient = new SshClient();
+    await new Promise<void>((resolve, reject) => {
+      this.sshClient!.once('ready', resolve);
+      this.sshClient!.once('error', reject);
+      this.sshClient!.connect(sshOptions);
+    });
+
+    return new Promise<ClientChannel>((resolve, reject) => {
+      this.sshClient!.forwardOut('127.0.0.1', 0, destinationHost, destinationPort, (error, stream) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stream);
+      });
+    });
   }
 
   private setupToolHandlers() {
@@ -283,10 +399,16 @@ class PostgresServer {
       );
     }
 
-    // Close existing connection if any
-    if (this.client) {
-      await this.client.end();
-      this.client = null;
+    // Close existing connection and SSH tunnel if any
+    if (this.client || this.sshClient) {
+      if (this.client) {
+        await this.client.end();
+        this.client = null;
+      }
+      if (this.sshClient) {
+        this.sshClient.end();
+        this.sshClient = null;
+      }
     }
 
     this.config = {
@@ -296,6 +418,7 @@ class PostgresServer {
       password: args.password,
       database: args.database,
     };
+    this.sshConfig = this.getSshConfig();
 
     try {
       await this.ensureConnection();

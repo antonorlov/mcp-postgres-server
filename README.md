@@ -39,6 +39,24 @@ The server requires the following environment variables:
 }
 ```
 
+### SSH tunnel (optional)
+
+If PostgreSQL is reachable only through an SSH bastion, configure the database host and port as the destination visible from that bastion, then add these variables to `env`:
+
+```json
+{
+  "SSH_HOST": "bastion.example.com",
+  "SSH_PORT": "22",
+  "SSH_USER": "deploy",
+  "SSH_PRIVATE_KEY_PATH": "/absolute/path/to/id_ed25519",
+  "SSH_HOST_FINGERPRINT": "SHA256:your-host-key-fingerprint"
+}
+```
+
+Authentication can use exactly one of `SSH_PRIVATE_KEY_PATH`, `SSH_PRIVATE_KEY`, or `SSH_PASSWORD`. For encrypted private keys, add `SSH_PRIVATE_KEY_PASSPHRASE`.
+
+`SSH_HOST_FINGERPRINT` is strongly recommended: it verifies the bastion's host key and prevents connecting to an unexpected server. The fingerprint is the SHA-256 value shown by `ssh-keygen -lf /path/to/known_hosts` (the optional `SHA256:` prefix is accepted). If it is omitted, the server logs a warning and connects without host-key verification for backwards-compatible setup.
+
 ## Available Tools
 
 ### 1. connect_db
