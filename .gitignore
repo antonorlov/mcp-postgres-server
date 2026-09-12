@@ -1,7 +1,11 @@
 node_modules/
 build/
+coverage/
 .env
+.env.*
 *.log
+*.tsbuildinfo
+*.tgz
 .DS_Store
 .idea/
 .vscode/

@@ -1,0 +1,367 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`tool surface (registration-time gating) > full (write + runtime connect) tool surface matches the snapshot 1`] = `
+{
+  "tools": [
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false,
+      },
+      "description": "Run one SQL statement against the connected PostgreSQL database and get rows back as JSON. Because the server was started with PG_ALLOW_WRITE=true, the statement is sent directly and can modify data - use the execute tool for writes and this for reads. Send exactly one statement per call. Prefer $1, $2 placeholders with the params array over interpolating values. Results are capped at ~32768 bytes; truncated:true means rows were dropped - add LIMIT/WHERE or select fewer columns.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "params": {
+            "description": "Positional parameter values bound to $1, $2, ... placeholders.",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null",
+              ],
+            },
+            "type": "array",
+          },
+          "sql": {
+            "description": "One SQL statement. Use $1, $2, ... for parameters.",
+            "type": "string",
+          },
+        },
+        "required": [
+          "sql",
+        ],
+        "type": "object",
+      },
+      "name": "query",
+      "title": "Run SQL",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+      },
+      "description": "Run one data-modifying SQL statement - INSERT, UPDATE, DELETE, or DDL like CREATE/ALTER - and get the affected row count back. Use the query tool for anything that reads. Send exactly one complete statement per call; do not use explicit transaction or session control (BEGIN, COMMIT, SET, ...). Prefer $1, $2 placeholders with the params array. This tool exists because the server was started with PG_ALLOW_WRITE=true.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "params": {
+            "description": "Positional parameter values bound to $1, $2, ... placeholders.",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null",
+              ],
+            },
+            "type": "array",
+          },
+          "sql": {
+            "description": "One INSERT / UPDATE / DELETE / DDL statement. Use $1, $2, ... for parameters.",
+            "type": "string",
+          },
+        },
+        "required": [
+          "sql",
+        ],
+        "type": "object",
+      },
+      "name": "execute",
+      "title": "Run a write statement",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true,
+      },
+      "description": "List every schema in the connected database. Start here when exploring an unfamiliar database, then call list_tables for the schema you care about.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {},
+        "type": "object",
+      },
+      "name": "list_schemas",
+      "title": "List schemas",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true,
+      },
+      "description": "List all tables in a schema (default: 'public'). Use this before querying tables you have not seen yet, then call describe_table for column details.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "description": "Schema name (default: 'public')",
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "name": "list_tables",
+      "title": "List tables",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true,
+      },
+      "description": "Show the structure of one table: column names, data types, nullability, defaults, and primary-key membership. Call this before writing non-trivial queries against a table.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "description": "Schema name (default: 'public')",
+            "type": "string",
+          },
+          "table": {
+            "description": "Table name",
+            "type": "string",
+          },
+        },
+        "required": [
+          "table",
+        ],
+        "type": "object",
+      },
+      "name": "describe_table",
+      "title": "Describe a table",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false,
+      },
+      "description": "Switch the server to a different PostgreSQL database at runtime, replacing the current connection. Only use this when the user explicitly asks to connect elsewhere or the configured connection fails - normal operation uses the connection from the environment. Read-only mode and the statement timeout are re-applied to the new connection.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "description": "Database name",
+            "type": "string",
+          },
+          "host": {
+            "description": "Database host",
+            "type": "string",
+          },
+          "password": {
+            "description": "Database password",
+            "type": "string",
+          },
+          "port": {
+            "description": "Database port (default: 5432)",
+            "type": "number",
+          },
+          "user": {
+            "description": "Database user",
+            "type": "string",
+          },
+        },
+        "required": [
+          "host",
+          "user",
+          "password",
+          "database",
+        ],
+        "type": "object",
+      },
+      "name": "connect_db",
+      "title": "Connect to a different database",
+    },
+  ],
+}
+`;
+
+exports[`tool surface (registration-time gating) > read-only (default) tool surface matches the snapshot 1`] = `
+{
+  "tools": [
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true,
+      },
+      "description": "Run one read-only SQL statement against the connected PostgreSQL database and get rows back as JSON. Send exactly one statement per call (SELECT, WITH, EXPLAIN, or SHOW). It runs inside an engine-enforced read-only transaction, so any write is refused by the database. Use this tool for all data reading, aggregation, and query planning. Prefer $1, $2 placeholders with the params array over interpolating values. Results are capped at ~32768 bytes; truncated:true means rows were dropped - add LIMIT/WHERE or select fewer columns.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "params": {
+            "description": "Positional parameter values bound to $1, $2, ... placeholders.",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null",
+              ],
+            },
+            "type": "array",
+          },
+          "sql": {
+            "description": "One SQL statement. Use $1, $2, ... for parameters.",
+            "type": "string",
+          },
+        },
+        "required": [
+          "sql",
+        ],
+        "type": "object",
+      },
+      "name": "query",
+      "title": "Run read-only SQL",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+      },
+      "description": "Run a data-modifying SQL statement (INSERT/UPDATE/DELETE or DDL). Currently DISABLED: the server is read-only, so this returns an error and changes nothing. To enable writes, the operator must start the server with PG_ALLOW_WRITE=true.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "params": {
+            "description": "Positional parameter values bound to $1, $2, ... placeholders.",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null",
+              ],
+            },
+            "type": "array",
+          },
+          "sql": {
+            "description": "One INSERT / UPDATE / DELETE / DDL statement. Use $1, $2, ... for parameters.",
+            "type": "string",
+          },
+        },
+        "required": [
+          "sql",
+        ],
+        "type": "object",
+      },
+      "name": "execute",
+      "title": "Run a write statement",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true,
+      },
+      "description": "List every schema in the connected database. Start here when exploring an unfamiliar database, then call list_tables for the schema you care about.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {},
+        "type": "object",
+      },
+      "name": "list_schemas",
+      "title": "List schemas",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true,
+      },
+      "description": "List all tables in a schema (default: 'public'). Use this before querying tables you have not seen yet, then call describe_table for column details.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "description": "Schema name (default: 'public')",
+            "type": "string",
+          },
+        },
+        "type": "object",
+      },
+      "name": "list_tables",
+      "title": "List tables",
+    },
+    {
+      "_meta": undefined,
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true,
+      },
+      "description": "Show the structure of one table: column names, data types, nullability, defaults, and primary-key membership. Call this before writing non-trivial queries against a table.",
+      "execution": {
+        "taskSupport": "forbidden",
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "description": "Schema name (default: 'public')",
+            "type": "string",
+          },
+          "table": {
+            "description": "Table name",
+            "type": "string",
+          },
+        },
+        "required": [
+          "table",
+        ],
+        "type": "object",
+      },
+      "name": "describe_table",
+      "title": "Describe a table",
+    },
+  ],
+}
+`;
