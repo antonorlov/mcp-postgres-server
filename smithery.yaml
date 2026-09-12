@@ -3,47 +3,145 @@
 startCommand:
   type: stdio
   configSchema:
-    # JSON Schema defining the configuration options for the MCP.
+    # Configuration for mcp-postgres-server 0.2.0. Connect with either a single
+    # DATABASE_URL (preferred) or the individual PG_* fields. Read-only by default.
     type: object
-    required:
-      - pgHost
-      - pgUser
-      - pgPassword
-      - pgDatabase
     properties:
+      databaseUrl:
+        type: string
+        description: >-
+          Full connection string, e.g.
+          postgres://user:pass@host:5432/db?sslmode=require (preferred). If set,
+          the individual host/port/user/password/database fields are ignored.
       pgHost:
         type: string
-        description: Hostname for the PostgreSQL server
+        description: Database host (used when databaseUrl is not set)
       pgPort:
         type: number
-        description: Port for the PostgreSQL server
+        description: Database port (used when databaseUrl is not set)
         default: 5432
       pgUser:
         type: string
-        description: PostgreSQL user name
+        description: Database user (used when databaseUrl is not set)
       pgPassword:
         type: string
-        description: PostgreSQL user's password
+        description: Database password (used when databaseUrl is not set)
       pgDatabase:
         type: string
-        description: PostgreSQL database name
+        description: Database name (used when databaseUrl is not set)
+      pgSslmode:
+        type: string
+        enum: [disable, allow, prefer, require, verify-ca, verify-full]
+        description: >-
+          TLS mode. require/allow/prefer encrypt without verifying the certificate;
+          verify-ca/verify-full verify it (supply a CA via pgSslCa). Unlike libpq,
+          allow/prefer do NOT fall back to plaintext - use disable for a server
+          without TLS. Applies to the PG_* fields; for databaseUrl put sslmode in
+          the URL instead.
+      pgSslCa:
+        type: string
+        description: Path to a CA certificate file. Setting it alone implies verify-full.
+      pgAllowWrite:
+        type: boolean
+        default: false
+        description: >-
+          Enable writes. Off by default: the execute tool is present but refuses
+          writes and each read runs in a READ ONLY transaction. When true, execute
+          performs writes and reads are sent directly.
+      pgEnableRuntimeConnect:
+        type: boolean
+        description: >-
+          Register the connect_db tool, which switches database at runtime via
+          tool arguments. Off by default.
+        default: false
+      pgMaxResultBytes:
+        type: number
+        description: >-
+          Byte budget for a query result sent to the model. Whole rows are kept up
+          to the budget; over it, returnedRows < rowCount and truncated is true.
+        default: 32768
+      pgStatementTimeout:
+        type: number
+        description: Per-statement timeout in milliseconds, applied to every session.
+        default: 30000
+      pgConnectTimeout:
+        type: number
+        description: Timeout in milliseconds for a single connect attempt.
+        default: 10000
+      pgSshHost:
+        type: string
+        description: >-
+          SSH bastion host. Setting it enables tunneling: the server reaches the
+          database only through an SSH tunnel to this host, which forwards to the
+          database from its own network. The database URL/host is interpreted from
+          the bastion's network. Optional; needs the ssh2 optional dependency.
+      pgSshPort:
+        type: number
+        description: SSH bastion port.
+        default: 22
+      pgSshUser:
+        type: string
+        description: SSH username.
+      pgSshPrivateKey:
+        type: string
+        description: >-
+          Path to a private key file. If unset, auth falls back like ssh: a
+          running agent (SSH_AUTH_SOCK), then a default key (~/.ssh/id_ed25519,
+          id_rsa, id_ecdsa).
+      pgSshPassphrase:
+        type: string
+        description: Passphrase for the private key, if encrypted.
+      pgSshAgent:
+        type: string
+        description: >-
+          'true' to use the ambient agent (SSH_AUTH_SOCK), or an explicit socket
+          path / Windows named pipe.
+      pgSshPassword:
+        type: string
+        description: >-
+          SSH login password (opt-in). A key or agent takes precedence; prefer
+          keys, as bastions often disable password auth.
+      pgSshFingerprint:
+        type: string
+        description: >-
+          Pinned host-key fingerprint (SHA256:...). Host-key verification is
+          mandatory and set only this way: without it the tunnel refuses to connect.
+      pgSshKeepaliveInterval:
+        type: number
+        description: SSH keepalive interval in ms; the tunnel drops after 3 unanswered keepalives.
+        default: 15000
   commandFunction:
-    # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
+    # Builds the CLI command and environment from the config. Only the fields
+    # that are set are passed through, so unset options fall back to defaults.
     |-
-    (config) => ({
-      command: 'node',
-      args: ['build/index.js'],
-      env: {
-        PG_HOST: config.pgHost,
-        PG_PORT: config.pgPort || 5432,
-        PG_USER: config.pgUser,
-        PG_PASSWORD: config.pgPassword,
-        PG_DATABASE: config.pgDatabase
+    (config) => {
+      const env = {};
+      if (config.databaseUrl) {
+        env.DATABASE_URL = config.databaseUrl;
+      } else {
+        if (config.pgHost) env.PG_HOST = config.pgHost;
+        if (config.pgPort) env.PG_PORT = String(config.pgPort);
+        if (config.pgUser) env.PG_USER = config.pgUser;
+        if (config.pgPassword) env.PG_PASSWORD = config.pgPassword;
+        if (config.pgDatabase) env.PG_DATABASE = config.pgDatabase;
       }
-    })
+      if (config.pgSslmode) env.PG_SSLMODE = config.pgSslmode;
+      if (config.pgSslCa) env.PG_SSL_CA = config.pgSslCa;
+      if (config.pgAllowWrite) env.PG_ALLOW_WRITE = 'true';
+      if (config.pgEnableRuntimeConnect) env.PG_ENABLE_RUNTIME_CONNECT = 'true';
+      if (config.pgMaxResultBytes) env.PG_MAX_RESULT_BYTES = String(config.pgMaxResultBytes);
+      if (config.pgStatementTimeout) env.PG_STATEMENT_TIMEOUT = String(config.pgStatementTimeout);
+      if (config.pgConnectTimeout) env.PG_CONNECT_TIMEOUT = String(config.pgConnectTimeout);
+      if (config.pgSshHost) env.PG_SSH_HOST = config.pgSshHost;
+      if (config.pgSshPort) env.PG_SSH_PORT = String(config.pgSshPort);
+      if (config.pgSshUser) env.PG_SSH_USER = config.pgSshUser;
+      if (config.pgSshPrivateKey) env.PG_SSH_PRIVATE_KEY = config.pgSshPrivateKey;
+      if (config.pgSshPassphrase) env.PG_SSH_PASSPHRASE = config.pgSshPassphrase;
+      if (config.pgSshAgent) env.PG_SSH_AGENT = config.pgSshAgent;
+      if (config.pgSshPassword) env.PG_SSH_PASSWORD = config.pgSshPassword;
+      if (config.pgSshFingerprint) env.PG_SSH_FINGERPRINT = config.pgSshFingerprint;
+      if (config.pgSshKeepaliveInterval) env.PG_SSH_KEEPALIVE_INTERVAL = String(config.pgSshKeepaliveInterval);
+      return { command: 'node', args: ['build/index.js'], env };
+    }
   exampleConfig:
-    pgHost: localhost
-    pgPort: 5432
-    pgUser: example_user
-    pgPassword: example_password
-    pgDatabase: example_db
+    databaseUrl: postgres://mcp_readonly:secret@localhost:5432/mydb?sslmode=require

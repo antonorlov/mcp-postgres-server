@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Full Node x Postgres sweep on the ends of both ranges, plus the
+        # current middle, without exploding into every combination.
+        node-version: [20, 22, 24]
+        postgres: ['13-alpine', '16-alpine', '17-alpine']
+        include:
+          - node-version: 24
+            postgres: '18-alpine'
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mcp_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm run coverage
+        env:
+          PG_TEST_URL: postgres://postgres:postgres@localhost:5432/mcp_test
