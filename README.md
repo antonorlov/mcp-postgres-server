@@ -3,11 +3,9 @@
 A Model Context Protocol (MCP) server for PostgreSQL: **read-only by default**,
 for local, Docker, RDS, Neon, and Supabase databases.
 
-The server is a small, auditable codebase ([`src/index.ts`](src/index.ts), the shared
-[`src/errors.ts`](src/errors.ts), and the optional [`src/ssh-connector.ts`](src/ssh-connector.ts))
-with four runtime dependencies: the MCP SDK, `pg`, `pg-connection-string`, and
-`zod` (plus `ssh2`, an optional dependency used only for SSH tunneling).
-Read-only is enforced by PostgreSQL itself.
+The server is small and auditable, with four runtime dependencies: the MCP SDK,
+`pg`, `pg-connection-string`, and `zod` (plus `ssh2`, an optional dependency used
+only for SSH tunneling). Read-only is enforced by PostgreSQL itself.
 
 Requires Node.js 20 or newer.
 
