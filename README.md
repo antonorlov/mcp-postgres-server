@@ -94,7 +94,7 @@ Alternatively, set the individual `PG_*` variables; they are used when
 | `PG_SSH_PASSPHRASE` | - | Passphrase for the private key, if encrypted |
 | `PG_SSH_AGENT` | - | `true` to use the ambient agent (`SSH_AUTH_SOCK`), or an explicit socket path / Windows named pipe (`\\.\pipe\openssh-ssh-agent`) |
 | `PG_SSH_PASSWORD` | - | SSH login password. Opt-in; a key or agent takes precedence. Prefer keys - a bastion often disables password auth. |
-| `PG_SSH_FINGERPRINT` | - | Pinned host-key fingerprint (`SHA256:...`). **Host-key verification is mandatory and set only this way**: without it the tunnel refuses to connect (fail-closed) |
+| `PG_SSH_FINGERPRINT` | - | Pinned host-key fingerprint (`SHA256:...`). **Host-key verification is mandatory and set only this way**: without it the tunnel refuses to connect (fail-closed). Get it with `ssh-keygen -lF host` (reads your `known_hosts`) or `ssh-keyscan host \| ssh-keygen -lf -` (see the trust note below) |
 | `PG_SSH_KEEPALIVE_INTERVAL` | `15000` | SSH keepalive interval in ms; the tunnel drops after 3 unanswered keepalives, and the next call reconnects |
 
 ### Connecting over an SSH tunnel
@@ -125,8 +125,14 @@ bastion**:
 - **SSH changes only the transport.** Read-only enforcement, the result size cap, timeouts, and
   `connect_db` behave exactly as on a direct connection, and no extra SQL is sent per query.
 - **Host-key verification is mandatory** via a pinned `PG_SSH_FINGERPRINT` - the tunnel will not
-  connect without it, so a man-in-the-middle bastion is refused. (Get the fingerprint with
-  `ssh-keyscan host | ssh-keygen -lf -`.)
+  connect without it, so a man-in-the-middle bastion is refused. Get the fingerprint over a channel
+  you trust, most trustworthy first:
+  - on the bastion itself, or from its admin: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+    (no network involved);
+  - from your existing `~/.ssh/known_hosts`, if you already reach the host over `ssh`:
+    `ssh-keygen -lF bastion.example.com`;
+  - fetched from the host: `ssh-keyscan bastion.example.com | ssh-keygen -lf -` (trust this only
+    when run from a network position you trust - it accepts whatever the host returns).
 - **TLS validates the real database hostname.** With `verify-full`, the certificate is checked against
   the database's own hostname (e.g. `db.internal`), not the loopback the tunnel binds locally, and
   `rejectUnauthorized` is pinned on so an inherited `NODE_TLS_REJECT_UNAUTHORIZED=0` cannot disable it.
