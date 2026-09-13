@@ -72,4 +72,5 @@ copy, or a role scoped to the exact tables the task needs.
   `rejectUnauthorized` is pinned on against an inherited
   `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 - Credentials (SSH key/password, DB password) come from the environment; `ssh2`
-  loads only when `PG_SSH_HOST` is set.
+  loads only when `PG_SSH_HOST` is set. The exception: with `connect_db` enabled
+  (`PG_ENABLE_RUNTIME_CONNECT=true`), its DB password is passed as a tool argument.

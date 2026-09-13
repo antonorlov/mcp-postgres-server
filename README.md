@@ -3,7 +3,8 @@
 A Model Context Protocol (MCP) server for PostgreSQL: **read-only by default**,
 for local, Docker, RDS, Neon, and Supabase databases.
 
-The whole server is one file ([`src/index.ts`](src/index.ts), under 900 lines)
+The server is a small, auditable codebase ([`src/index.ts`](src/index.ts), the shared
+[`src/errors.ts`](src/errors.ts), and the optional [`src/ssh-connector.ts`](src/ssh-connector.ts))
 with four runtime dependencies: the MCP SDK, `pg`, `pg-connection-string`, and
 `zod` (plus `ssh2`, an optional dependency used only for SSH tunneling).
 Read-only is enforced by PostgreSQL itself.
@@ -140,6 +141,23 @@ bastion**:
   never initializes it. npm installs optional dependencies by default; run
   `npm install --omit=optional` to skip it entirely (a direct connection does not need it).
 
+When a tunneled connection fails, the tool result carries a stable `code` (and, where the cause is
+determinate, a hint naming the setting to fix), so the failing phase is unambiguous:
+
+| code | meaning | first thing to check |
+|------|---------|----------------------|
+| `SSH_CONFIG_INVALID` | invalid SSH config, incl. a malformed `PG_SSH_FINGERPRINT` | the `PG_SSH_*` values |
+| `SSH_KEY_INVALID` | key unreadable, unparseable, a public key, or encrypted without the right passphrase (an encrypted key with the correct `PG_SSH_PASSPHRASE` works) | `PG_SSH_PRIVATE_KEY`, `PG_SSH_PASSPHRASE` |
+| `SSH_CONNECT_FAILED` | the bastion is unreachable, or SSH setup failed for an unclassified reason | `PG_SSH_HOST`, `PG_SSH_PORT`, reachability |
+| `SSH_TIMEOUT` | the bastion did not respond in time | network/firewall, `PG_CONNECT_TIMEOUT` |
+| `SSH_AUTH_FAILED` | the bastion rejected authentication | `PG_SSH_USER` and the key/agent/password in use |
+| `SSH_HOST_KEY_MISMATCH` | host key does not match `PG_SSH_FINGERPRINT` (stale value or MITM) | re-fetch the fingerprint (above) |
+| `SSH_FORWARD_FAILED` | tunnel is up, but the bastion could not reach the database | the DB host and port as seen from the bastion |
+| `SSH_CONNECTION_LOST` | an established tunnel dropped mid-session | transient; the next call reconnects |
+
+A genuine PostgreSQL error through a healthy tunnel keeps its own code (e.g. `28P01` for wrong
+database credentials), not an SSH code.
+
 ### Example configurations
 
 **Local Postgres:**
@@ -192,6 +210,8 @@ Execute a read-only SQL statement. Accepts `SELECT`, `WITH ... SELECT`,
 by the extended query protocol. In read-only mode (the default) the statement runs
 as `BEGIN READ ONLY`, the query, and `ROLLBACK` - three commands, roughly two
 network round trips with pipelining - so the database itself refuses any write.
+With `PG_ALLOW_WRITE=true` the statement is sent directly, without that wrapper, so a
+write run through `query` would execute - use `execute` for writes.
 Supports PostgreSQL-style `$1, $2` prepared-statement parameters; values are bound
 by the driver and never spliced into the SQL text.
 
@@ -358,15 +378,15 @@ a snapshot, or a tightly scoped role. See [SECURITY.md](SECURITY.md).
 ## Error Handling
 
 SQL and connection failures are returned as tool results (`isError: true`)
-with a message, the SQLSTATE code, and a hint where one is known - for
-example:
+with a message, the SQLSTATE code, and a hint. PostgreSQL's own server hint is
+used when present; otherwise these fallbacks apply - for example:
 
 * `28P01` -> check `PG_USER`/`PG_PASSWORD`
 * `3D000` -> database does not exist, check `PG_DATABASE`
 * `42P01` -> relation not found, call `list_tables`
 * `42703` -> column not found, call `describe_table`
-* `57014` -> statement timeout, add `LIMIT` or simplify the query
-* `25006` -> server is read-only, set `PG_ALLOW_WRITE=true` to enable writes
+* `57014` -> the query was canceled; if it hit `PG_STATEMENT_TIMEOUT`, add a `LIMIT` or simplify it
+* `25006` -> the transaction is read-only (its source may be a read-only role, a replica, a server default, or - for `query` - the read-only wrapper; `execute` writes need `PG_ALLOW_WRITE=true`)
 * `ECONNREFUSED`/`ENOTFOUND` -> check `PG_HOST`/`PG_PORT`/`DATABASE_URL`
 
 ## Migrating from 0.1.x

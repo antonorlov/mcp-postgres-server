@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { classifyPgError, createServer, defaultConnector, loadConfig, type Connector } from '../src/index.js';
+import { classifyError, createServer, defaultConnector, loadConfig, type Connector } from '../src/index.js';
 
 const PG_TEST_URL = process.env.PG_TEST_URL;
 const TABLE = 'mcp_v2_integration_test';
@@ -179,7 +179,6 @@ describe.skipIf(!PG_TEST_URL)('integration: real Postgres via PG_TEST_URL', () =
       });
       expect(result.isError).toBe(true);
       expect(textOf(result)).toMatch(/read-only|PG_ALLOW_WRITE/); // names the fix
-      // the write never ran - row count unchanged.
       const after = (await admin.query(`SELECT count(*)::int AS n FROM ${TABLE}`)).rows[0].n;
       expect(after).toBe(before);
     } finally {
@@ -197,7 +196,6 @@ describe.skipIf(!PG_TEST_URL)('integration: real Postgres via PG_TEST_URL', () =
       expect(result.isError).toBe(true);
       expect(textOf(result)).toMatch(/delete|read-only/i);
 
-      // And the data is untouched.
       const { rows } = await admin.query(`SELECT count(*)::int AS n FROM ${TABLE}`);
       expect(rows[0].n).toBe(3);
     } finally {
@@ -221,18 +219,19 @@ describe.skipIf(!PG_TEST_URL)('integration: real Postgres via PG_TEST_URL', () =
       expect(pgErr.code).toBe('25006');
       expect(pgErr.message).toMatch(/cannot execute INSERT in a read-only transaction/);
 
-      // ...and classifyPgError turns that engine error into the right hint.
-      expect(classifyPgError(pgErr).hint).toMatch(/PG_ALLOW_WRITE/);
+      // ...and classifyError describes it as a read-only transaction without presuming PG_ALLOW_WRITE
+      // is the fix - here it is a server default (default_transaction_read_only), not our setting.
+      const classified = classifyError(pgErr);
+      expect(classified.hint).toMatch(/read-only/i);
+      expect(classified.hint).not.toMatch(/PG_ALLOW_WRITE/);
     } finally {
       await raw.end();
     }
   });
 
   it('the set_config() read-only bypass is neutralized by the rolled-back transaction', async () => {
-    // The historical bypass: SELECT set_config('default_transaction_read_only','off',false),
-    // then a second read that writes. Here set_config runs inside the per-query
-    // BEGIN READ ONLY and is reverted by ROLLBACK, so it never reaches the session,
-    // and each later query is its own read-only transaction anyway.
+    // Historical bypass (set_config('default_transaction_read_only','off') then a write): here it runs
+    // inside the per-query BEGIN READ ONLY and is reverted by ROLLBACK, never reaching the session.
     const { client, close } = await openServer();
     try {
       const bypass = await client.callTool({

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type pg from 'pg';
-import { createApp, createDatabase, createServer, loadConfig, type Connection, type Connector, type ServerConfig } from '../src/index.js';
+import { ConnectionError, createApp, createDatabase, createServer, loadConfig, type Connection, type Connector, type ServerConfig } from '../src/index.js';
 
 interface FakeOptions {
   connectError?: Error;
@@ -271,6 +271,40 @@ describe('connector lifecycle contract', () => {
     expect(r.ok).toBe(true); // else the fake throws "already been connected"
     await db.query('SELECT 2'); // reuses the live connection
     expect(fake.connectCount).toBe(1);
+    await db.close();
+  });
+
+  it("prefers the connection's transport diagnosis over pg's generic error when a query fails", async () => {
+    // A dropped SSH tunnel: the connector's Connection.diagnose() explains the failure better than pg.
+    const fake = new FakeClient({ queryError: new Error('Connection terminated unexpectedly') });
+    const diagnosis = new ConnectionError('SSH_CONNECTION_LOST', 'the SSH tunnel to the bastion dropped', { hint: 'the next call reconnects' });
+    const connector: Connector = {
+      async connect() {
+        await (fake as unknown as pg.Client).connect();
+        return { client: fake as unknown as pg.Client, close: () => fake.end().catch(() => undefined), diagnose: () => diagnosis };
+      },
+    };
+    const db = createDatabase(loadConfig({ DATABASE_URL: URL }), connector);
+    const r = await db.query('SELECT will_fail');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toEqual({ code: 'SSH_CONNECTION_LOST', message: 'the SSH tunnel to the bastion dropped', hint: 'the next call reconnects' });
+    await db.close();
+  });
+
+  it("uses the connection's transport diagnosis when session setup fails, not pg's generic error", async () => {
+    // The tunnel drops during applySessionSettings; the diagnosis must reach the model, not "terminated".
+    const fake = new FakeClient({ settingsError: new Error('Connection terminated unexpectedly') });
+    const diagnosis = new ConnectionError('SSH_CONNECTION_LOST', 'the SSH tunnel to the bastion dropped', { hint: 'the next call reconnects' });
+    const connector: Connector = {
+      async connect() {
+        await (fake as unknown as pg.Client).connect();
+        return { client: fake as unknown as pg.Client, close: () => fake.end().catch(() => undefined), diagnose: () => diagnosis };
+      },
+    };
+    const db = createDatabase(loadConfig({ DATABASE_URL: URL }), connector);
+    const r = await db.query('SELECT 1');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toEqual({ code: 'SSH_CONNECTION_LOST', message: 'the SSH tunnel to the bastion dropped', hint: 'the next call reconnects' });
     await db.close();
   });
 

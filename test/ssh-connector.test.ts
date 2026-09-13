@@ -27,8 +27,10 @@ mkdirSync(join(HOME_WITH_KEY, '.ssh'), { recursive: true });
 writeFileSync(join(HOME_WITH_KEY, '.ssh', 'id_ed25519'), 'DEFAULT-KEY-BYTES');
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-// Minimal SSH config with host-key verification satisfied via a pinned fingerprint.
-const BASE: SshConfig = { host: 'bastion', port: 22, fingerprint: 'SHA256:x', keepaliveIntervalMs: 15000 };
+// Minimal SSH config with host-key verification satisfied via a well-formed pinned fingerprint
+// (43 base64 chars, as a real SHA256 fingerprint is).
+const VALID_FP = `SHA256:${'A'.repeat(43)}`;
+const BASE: SshConfig = { host: 'bastion', port: 22, fingerprint: VALID_FP, keepaliveIntervalMs: 15000 };
 
 function makeSsh() {
   const events: Record<string, Array<(...a: unknown[]) => void>> = {};
@@ -65,7 +67,7 @@ function makePg(opts: { connectError?: Error } = {}) {
   };
 }
 
-function depsFor(ssh: ReturnType<typeof makeSsh>, client: ReturnType<typeof makePg>, openError?: Error): SshConnectorDeps {
+function depsFor(ssh: ReturnType<typeof makeSsh>, client: ReturnType<typeof makePg>, openError?: Error, keyError?: Error): SshConnectorDeps {
   return {
     openSsh: async () => {
       if (openError) throw openError;
@@ -75,6 +77,7 @@ function depsFor(ssh: ReturnType<typeof makeSsh>, client: ReturnType<typeof make
       client.options = options;
       return client as unknown as pg.Client;
     },
+    validateKey: async () => keyError, // parseKey stand-in: undefined = valid
   };
 }
 
@@ -87,8 +90,13 @@ describe('buildHostVerifier', () => {
     expect(buildHostVerifier({ ...BASE, fingerprint: `SHA256:${fp}` })(key)).toBe(true);
   });
 
-  it('rejects a non-matching fingerprint', () => {
-    expect(buildHostVerifier({ ...BASE, fingerprint: 'deadbeef' })(key)).toBe(false);
+  it('rejects a non-matching but well-formed fingerprint', () => {
+    expect(buildHostVerifier({ ...BASE, fingerprint: `SHA256:${'B'.repeat(43)}` })(key)).toBe(false);
+  });
+
+  it('rejects a malformed fingerprint up front (SSH_CONFIG_INVALID), not as an ambiguous mismatch', () => {
+    expect(() => buildHostVerifier({ ...BASE, fingerprint: 'deadbeef' })).toThrow(/not a valid SHA256 fingerprint/);
+    expect(() => buildHostVerifier({ ...BASE, fingerprint: 'aa:bb:cc:dd' })).toThrow(/not a valid SHA256 fingerprint/);
   });
 
   it('fails closed when no fingerprint is configured (fingerprint is the only host-key mode)', () => {
@@ -186,11 +194,80 @@ describe('createSshConnector.connect', () => {
     expect(ssh.ended).toBe(1);
   });
 
-  it('propagates an SSH open failure (host-key rejection / handshake) and opens no pg client', async () => {
+  it('classifies an SSH open failure by ssh2 structured level/code and opens no pg client', async () => {
+    const cases: Array<[Error, string]> = [
+      [Object.assign(new Error('All configured authentication methods failed'), { level: 'client-authentication' }), 'SSH_AUTH_FAILED'],
+      [Object.assign(new Error('connect ECONNREFUSED 10.0.0.1:22'), { level: 'client-socket', code: 'ECONNREFUSED' }), 'SSH_CONNECT_FAILED'],
+      [Object.assign(new Error('Timed out while waiting for handshake'), { level: 'client-timeout' }), 'SSH_TIMEOUT'],
+    ];
+    for (const [openError, code] of cases) {
+      const pgc = makePg();
+      await expect(createSshConnector(ssh256, depsFor(makeSsh(), pgc, openError)).connect(cfg())).rejects.toMatchObject({ code });
+      expect(pgc.connected).toBe(0);
+    }
+  });
+
+  it('trusts structured fields over message text: an ENOTFOUND host containing a keyword is SSH_CONNECT_FAILED, not SSH_KEY_INVALID', async () => {
+    const enotfound = Object.assign(new Error('getaddrinfo ENOTFOUND encrypted-bastion.example'), { level: 'client-dns', code: 'ENOTFOUND' });
+    await expect(createSshConnector(ssh256, depsFor(makeSsh(), makePg(), enotfound)).connect(cfg())).rejects.toMatchObject({ code: 'SSH_CONNECT_FAILED' });
+  });
+
+  it('validates the private key up front (SSH_KEY_INVALID) before opening the SSH connection', async () => {
     const ssh = makeSsh();
     const pgc = makePg();
-    await expect(createSshConnector(ssh256, depsFor(ssh, pgc, new Error('handshake refused'))).connect(cfg())).rejects.toThrow('handshake refused');
+    const withKey: SshConfig = { ...BASE, privateKeyPath: KEY_PATH };
+    await expect(createSshConnector(withKey, depsFor(ssh, pgc, undefined, new Error('Encrypted private key detected, but no passphrase given'))).connect(cfg()))
+      .rejects.toMatchObject({ code: 'SSH_KEY_INVALID' });
+    expect(ssh.ended).toBe(0); // never opened the SSH connection
     expect(pgc.connected).toBe(0);
+  });
+
+  it('names SSH without inventing a cause when the open failure is unrecognized', async () => {
+    const pgc = makePg();
+    await expect(createSshConnector(ssh256, depsFor(makeSsh(), pgc, new Error('handshake refused'))).connect(cfg()))
+      .rejects.toMatchObject({ code: 'SSH_CONNECT_FAILED', message: expect.stringContaining('handshake refused') });
+  });
+
+  it('an auth failure hint names the settings for the auth method actually used (agent here)', async () => {
+    const err = await createSshConnector(ssh256, depsFor(makeSsh(), makePg(), Object.assign(new Error('x'), { level: 'client-authentication' })))
+      .connect(cfg()).catch((e: unknown) => e as { hint?: string });
+    expect(err.hint).toMatch(/agent|SSH_AUTH_SOCK|PG_SSH_AGENT/);
+  });
+
+  it('a genuine PostgreSQL error through a healthy tunnel keeps its own message (not an SSH code)', async () => {
+    const pgc = makePg({ connectError: Object.assign(new Error('password authentication failed'), { code: '28P01' }) });
+    await expect(createSshConnector(ssh256, depsFor(makeSsh(), pgc)).connect(cfg()))
+      .rejects.toMatchObject({ code: '28P01', message: expect.stringContaining('password authentication failed') });
+  });
+
+  it('classifies an SSH drop DURING the pg connect as SSH_CONNECTION_LOST, not a generic pg EOF', async () => {
+    const ssh = makeSsh();
+    const pgc = {
+      options: undefined as pg.ClientConfig | undefined, connected: 0, ended: 0,
+      async connect(): Promise<void> { this.connected++; ssh.emit('close'); throw new Error('Connection terminated unexpectedly'); },
+      async end(): Promise<void> { this.ended++; },
+    };
+    const deps: SshConnectorDeps = {
+      openSsh: async () => ssh as unknown as SshClientLike,
+      createPgClient: (o) => { pgc.options = o; return pgc as unknown as pg.Client; },
+      validateKey: async () => undefined,
+    };
+    await expect(createSshConnector(ssh256, deps).connect(cfg())).rejects.toMatchObject({ code: 'SSH_CONNECTION_LOST' });
+  });
+
+  it('diagnose() preserves the tunnel-loss cause through the automatic cleanup the drop triggers', async () => {
+    const ssh = makeSsh();
+    const conn = await createSshConnector(ssh256, depsFor(ssh, makePg())).connect(cfg());
+    ssh.emit('close'); // tunnel drops mid-session
+    const closing = conn.close(); // cleanup starts before the failed query reads the diagnosis
+    expect(conn.diagnose?.()?.code).toBe('SSH_CONNECTION_LOST');
+    await closing;
+  });
+
+  it('diagnose() returns nothing for an intentional close with no prior drop', async () => {
+    const conn = await createSshConnector(ssh256, depsFor(makeSsh(), makePg())).connect(cfg());
+    await conn.close();
+    expect(conn.diagnose?.()).toBeUndefined();
   });
 
   it('rejects before opening anything when host-key verification is not configured', async () => {

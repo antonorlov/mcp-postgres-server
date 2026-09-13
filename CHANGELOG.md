@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- SSH failures are classified into stable `code`s (`SSH_CONFIG_INVALID`, `SSH_KEY_INVALID`,
+  `SSH_CONNECT_FAILED`, `SSH_TIMEOUT`, `SSH_AUTH_FAILED`, `SSH_HOST_KEY_MISMATCH`,
+  `SSH_FORWARD_FAILED`, `SSH_CONNECTION_LOST`) with SSH-named messages and, where the cause is
+  determinate, a hint pointing at the `PG_SSH_*` setting to fix, so the model can tell a bastion
+  outage from an auth or host-key problem. A PostgreSQL error through a healthy tunnel keeps its own code.
+- `PG_SSH_FINGERPRINT` format is validated up front: a malformed value reports `SSH_CONFIG_INVALID`
+  instead of an ambiguous host-key mismatch. README documents how to obtain the fingerprint.
+
+### Fixed
+
+- Error hints preserve PostgreSQL's own server `hint` when present, and no longer overstate the cause:
+  `57014` reports a canceled query (not always a timeout), and `25006` reports a read-only transaction
+  without presuming `PG_ALLOW_WRITE` is the fix (it may be a replica or a server default).
+- `bin` path no longer carries a `./` prefix and `repository.url` is `git+`-prefixed, so `npm publish`
+  emits no auto-correction warnings.
+
 ## [0.2.0] - 2026-09-13
 
 > **BREAKING (from 0.1.x):**
@@ -71,4 +91,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Releases prior to 0.2.0 predate this changelog.
 
+[Unreleased]: https://github.com/antonorlov/mcp-postgres-server/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/antonorlov/mcp-postgres-server/releases/tag/v0.2.0

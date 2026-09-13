@@ -1,10 +1,10 @@
-// Pure-function units: capBySize, classifyPgError, loadConfig, resolveClientOptions. Pin the
+// Pure-function units: capBySize, classifyError, loadConfig, resolveClientOptions. Pin the
 // safe-by-default posture (read-only unless PG_ALLOW_WRITE, connect_db off unless PG_ENABLE_RUNTIME_CONNECT).
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { baseClientOptions, capBySize, classifyPgError, defaultClientFactory, loadConfig, resolveClientOptions } from '../src/index.js';
+import { baseClientOptions, capBySize, classifyError, ConnectionError, defaultClientFactory, loadConfig, resolveClientOptions } from '../src/index.js';
 
 describe('capBySize', () => {
   it('keeps every row when the combined JSON size fits the budget', () => {
@@ -34,7 +34,7 @@ describe('capBySize', () => {
   });
 });
 
-describe('classifyPgError', () => {
+describe('classifyError', () => {
   const pgError = (message: string, code: string) =>
     Object.assign(new Error(message), { code });
 
@@ -43,33 +43,60 @@ describe('classifyPgError', () => {
     ['3D000', 'database "nope" does not exist', /PG_DATABASE/],
     ['42P01', 'relation "userz" does not exist', /list_tables/],
     ['42703', 'column "nmae" does not exist', /describe_table/],
-    ['57014', 'canceling statement due to statement timeout', /LIMIT/i],
-    ['25006', 'cannot execute INSERT in a read-only transaction', /PG_ALLOW_WRITE/],
+    ['57014', 'canceling statement due to statement timeout', /canceled/i],
+    ['25006', 'cannot execute INSERT in a read-only transaction', /read-only/i],
   ])('maps SQLSTATE %s to an actionable hint', (code, message, hintPattern) => {
-    const classified = classifyPgError(pgError(message, code));
+    const classified = classifyError(pgError(message, code));
     expect(classified.message).toBe(message);
     expect(classified.code).toBe(code);
     expect(classified.hint).toMatch(hintPattern);
   });
 
+  it("prefers PostgreSQL's own server hint over the generic table", () => {
+    const withServerHint = Object.assign(new Error('column reference is ambiguous'), { code: '42702', hint: 'Try qualifying the column with a table name.' });
+    expect(classifyError(withServerHint).hint).toBe('Try qualifying the column with a table name.');
+    // Even a code we have a fallback for defers to the server's hint.
+    const serverOverridesOurs = Object.assign(new Error('relation "x" does not exist'), { code: '42P01', hint: 'Perhaps you meant "public.y".' });
+    expect(classifyError(serverOverridesOurs).hint).toBe('Perhaps you meant "public.y".');
+  });
+
+  it('does not contradict a user cancel (57014) or presume the read-only source (25006)', () => {
+    const canceled = classifyError(pgError('canceling statement due to user request', '57014'));
+    expect(canceled.hint).not.toMatch(/timeout exceeded/i); // was the contradiction
+    expect(canceled.hint).toMatch(/canceled/i);
+    const readOnly = classifyError(pgError('cannot execute UPDATE in a read-only transaction', '25006'));
+    expect(readOnly.hint).not.toMatch(/PG_ALLOW_WRITE/); // MCP setting cannot fix a replica / server default
+    expect(readOnly.hint).toMatch(/read-only/i);
+  });
+
   it.each(['ECONNREFUSED', 'ENOTFOUND'])(
     'maps connection error %s to a host/port hint',
     (code) => {
-      const classified = classifyPgError(pgError('connect failed', code));
+      const classified = classifyError(pgError('connect failed', code));
       expect(classified.hint).toMatch(/PG_HOST|PG_PORT|DATABASE_URL/);
     }
   );
 
   it('returns message only for unknown SQLSTATE codes', () => {
-    const classified = classifyPgError(pgError('something odd', '99999'));
+    const classified = classifyError(pgError('something odd', '99999'));
     expect(classified.message).toBe('something odd');
     expect(classified.hint).toBeUndefined();
   });
 
   it('copes with non-Error throwables', () => {
-    const classified = classifyPgError('kaboom');
+    const classified = classifyError('kaboom');
     expect(classified.message).toContain('kaboom');
     expect(classified.hint).toBeUndefined();
+  });
+
+  it('passes a pre-classified ConnectionError through unchanged (code + hint, no cause leaked)', () => {
+    const classified = classifyError(new ConnectionError('SSH_AUTH_FAILED', 'SSH authentication to the bastion failed (h:22)', { hint: 'check PG_SSH_USER', cause: new Error('secret') }));
+    expect(classified).toEqual({ code: 'SSH_AUTH_FAILED', message: 'SSH authentication to the bastion failed (h:22)', hint: 'check PG_SSH_USER' });
+  });
+
+  it('passes a ConnectionError with no hint through with just code + message', () => {
+    const classified = classifyError(new ConnectionError('SSH_CONNECT_FAILED', 'could not reach the SSH bastion (h:22)'));
+    expect(classified).toEqual({ code: 'SSH_CONNECT_FAILED', message: 'could not reach the SSH bastion (h:22)' });
   });
 });
 

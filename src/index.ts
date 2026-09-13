@@ -14,6 +14,10 @@ import net from 'node:net';
 import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { classifyError, ConnectionError, type DatabaseError } from './errors.js';
+
+export { classifyError, ConnectionError };
+export type { DatabaseError } from './errors.js';
 
 const VERSION: string = createRequire(import.meta.url)('../package.json').version;
 
@@ -23,8 +27,7 @@ const DEFAULT_SCHEMA = 'public';
 
 // --- config - all environment handling ---
 
-// PG_SSH_*; consumed only by the optional ssh-connector. Host-key verification is mandatory: the
-// connector fails closed unless a pinned fingerprint is given.
+// PG_SSH_*; consumed only by the optional ssh-connector.
 export interface SshConfig {
   host: string;
   port: number;
@@ -154,11 +157,8 @@ function sslForMode(sslMode: string | undefined, caPath: string | undefined): Se
   const params = new URLSearchParams({ sslmode: mode });
   if (caPath !== undefined) params.set('sslrootcert', caPath);
   const ssl = parseConnectionString(`postgres://h/d?${params.toString()}`, { useLibpqCompat: true }).ssl as ServerConfig['ssl'];
-  /**
-   * For verifying modes pg-connection-string leaves rejectUnauthorized unset, so it inherits Node's
-   * default, which NODE_TLS_REJECT_UNAUTHORIZED=0 flips to "no verification". Pin it so our policy
-   * survives an inherited global bypass. require/prefer keep their deliberate false.
-   */
+  // Verifying modes: pin rejectUnauthorized so an inherited NODE_TLS_REJECT_UNAUTHORIZED=0 can't
+  // disable verification. require/prefer keep their deliberate false.
   if (typeof ssl === 'object' && ssl !== null && ssl.rejectUnauthorized === undefined && (mode === 'verify-ca' || mode === 'verify-full')) {
     ssl.rejectUnauthorized = true;
   }
@@ -203,11 +203,8 @@ export function loadConfig(env: Record<string, string | undefined>): ServerConfi
 
 // --- connection - client construction (injectable for tests) ---
 
-/**
- * query_timeout must exceed statement_timeout: it is the client-side deadline that outlives the
- * server timeout on a stalled socket (in pipeline mode it destroys the connection when it fires).
- * pipeline sends query and ROLLBACK in one round-trip (pg 8.23+).
- */
+// query_timeout is the client-side deadline outliving the server timeout on a stalled socket; it must
+// exceed statement_timeout. pipeline sends query and ROLLBACK in one round-trip (pg 8.23+).
 export function baseClientOptions(cfg: ServerConfig) {
   return {
     connectionTimeoutMillis: cfg.connectTimeoutMs,
@@ -225,12 +222,8 @@ function normalizeHost(host: string | undefined): string | undefined {
   return m !== null && net.isIP(m[1]) !== 0 ? m[1] : host;
 }
 
-/**
- * Resolve the COMPLETE pg client options once, for both connectors: full connection-string settings
- * (application_name, options/search_path, credentials) via pg-connection-string, our ssl policy
- * (URL ssl params were stripped in loadConfig), a normalized IPv6 host, and the shared options. A
- * tunneling connector reuses this and overrides only the endpoint (host/port) and TLS servername.
- */
+// The COMPLETE pg client options, for both connectors. A tunneling connector reuses this and
+// overrides only the endpoint (host/port) and TLS servername.
 export function resolveClientOptions(cfg: ServerConfig): pg.ClientConfig {
   const parsed: pg.ClientConfig = cfg.connectionString !== undefined
     ? toClientConfig(parseConnectionString(cfg.connectionString))
@@ -249,24 +242,22 @@ export function defaultClientFactory(cfg: ServerConfig): pg.Client {
   return new pg.Client(resolveClientOptions(cfg));
 }
 
-// A live, connected pg client plus any resources behind it (e.g. an SSH tunnel). close() releases
-// all of them and is idempotent - the single lifecycle owner every cleanup path goes through.
+// A live, connected pg client plus any resources behind it (e.g. an SSH tunnel); close() releases all, idempotently.
 export interface Connection {
   client: pg.Client;
   close(): Promise<void>;
+  // Transport-agnostic diagnosis of a failure just seen on `client` (e.g. a dropped SSH tunnel),
+  // else undefined. The data layer runs it through the shared mapper, unaware of the transport.
+  diagnose?(): ConnectionError | undefined;
 }
 
-/**
- * Opens a live Connection: the returned client is already connected (and any resource behind it is
- * up); on failure it rejects having released what it opened. Injected so transports (SSH, pooling)
- * and tests vary without the database or tool layers knowing.
- */
+// Opens a live Connection (client already connected); on failure it rejects having released what it
+// opened. Injected so transports (SSH, pooling) and tests vary without the data/tool layers knowing.
 export interface Connector {
   connect(cfg: ServerConfig): Promise<Connection>;
 }
 
-// A plain pg client with no extra resources. On connect failure it ends the half-open socket so the
-// original error survives; close() ends the socket.
+// A plain pg client; on connect failure it ends the half-open socket so the original error survives.
 export const defaultConnector: Connector = {
   async connect(cfg) {
     const client = defaultClientFactory(cfg);
@@ -280,8 +271,7 @@ export const defaultConnector: Connector = {
   },
 };
 
-// Force pg's EXTENDED protocol, so the engine rejects multi-command strings. (queryMode lags in
-// @types/pg, hence the cast.)
+// EXTENDED protocol, so the engine rejects multi-command strings (queryMode lags in @types/pg, hence the cast).
 function extendedQuery(text: string, values: unknown[]): pg.QueryConfig {
   return { text, values, queryMode: 'extended' } as pg.QueryConfig & { queryMode: string };
 }
@@ -307,16 +297,9 @@ export interface ColumnInfo {
   is_primary_key: boolean;
 }
 
-export interface DatabaseError {
-  message: string;
-  code?: string;
-  hint?: string;
-}
-
 export type Result<T> = { ok: true; data: T } | { ok: false; error: DatabaseError };
 
-// Typed data access that owns the pg client (never leaks it), so tool handlers depend on this
-// contract rather than on pg.
+// Typed data access that owns the pg client (never leaks it), so tool handlers depend on this, not pg.
 export interface Database {
   query(sql: string, params?: unknown[]): Promise<Result<QueryData>>;
   execute(sql: string, params?: unknown[]): Promise<Result<ExecData>>;
@@ -327,11 +310,8 @@ export interface Database {
   close(): Promise<void>;
 }
 
-/**
- * Keep whole rows whose compact-JSON size fits maxBytes, so what the model receives is bounded by
- * payload size, not an arbitrary row count. The budget is strict: if not even the first row fits,
- * none are returned (the caller reports that), so the response never blows past the budget.
- */
+// Keep whole rows whose compact-JSON size fits maxBytes, so the payload is bounded by size, not a row
+// count. Strict: if not even the first row fits, none are returned (the caller reports that).
 export function capBySize<T>(rows: T[], maxBytes: number): { rows: T[]; truncated: boolean } {
   const kept: T[] = [];
   let bytes = 2; // enclosing []
@@ -344,36 +324,8 @@ export function capBySize<T>(rows: T[], maxBytes: number): { rows: T[]; truncate
   return { rows: kept, truncated: kept.length < rows.length };
 }
 
-// SQLSTATE / syscall codes mapped to actionable hints for the model.
-const PG_ERROR_HINTS: Record<string, string> = {
-  '28P01': 'authentication failed: check PG_USER and PG_PASSWORD',
-  '3D000': 'database does not exist: check PG_DATABASE',
-  ECONNREFUSED: 'could not reach the database server: check PG_HOST, PG_PORT, or DATABASE_URL',
-  ENOTFOUND: 'could not resolve the database host: check PG_HOST, PG_PORT, or DATABASE_URL',
-  '42P01': 'relation not found: call list_tables to see the available tables',
-  '42703': 'column not found: call describe_table to see the table structure',
-  '57014': 'statement timeout exceeded: add a LIMIT clause or simplify the query',
-  '25006': 'the server is read-only by default (since 0.2.0); set PG_ALLOW_WRITE=true to enable writes',
-};
 
-export function classifyPgError(err: unknown): DatabaseError {
-  let message = String(err);
-  let code: string | undefined;
-  if (typeof err === 'object' && err !== null) {
-    const e = err as Record<string, unknown>;
-    if (typeof e.message === 'string' && e.message !== '') message = e.message;
-    if (typeof e.code === 'string') code = e.code;
-  }
-  const hint = code !== undefined ? PG_ERROR_HINTS[code] : undefined;
-  return {
-    message,
-    ...(code !== undefined ? { code } : {}),
-    ...(hint !== undefined ? { hint } : {}),
-  };
-}
-
-// Owns one lazily-connected pg client; reconnects after errors and re-applies session settings on
-// every (re)connect.
+// Owns one lazily-connected pg client; reconnects after errors and re-applies session settings.
 export function createDatabase(
   config: ServerConfig,
   connector: Connector = defaultConnector
@@ -384,13 +336,12 @@ export function createDatabase(
   // await them, and cleanup failures are logged in one place, never thrown.
   let pendingCleanup: Promise<void> = Promise.resolve();
 
-  // Release a connection once; a cleanup failure is logged, never thrown or left unhandled, so it
-  // can't mask an original error.
+  // Release a connection once; a cleanup failure is logged, never thrown, so it can't mask an original error.
   function teardown(conn: Connection): Promise<void> {
     const done = Promise.resolve()
       .then(() => conn.close())
       .catch((err: unknown) => {
-        console.error(`[postgres-server] connection cleanup failed: ${classifyPgError(err).message}`);
+        console.error(`[postgres-server] connection cleanup failed: ${classifyError(err).message}`);
       });
     pendingCleanup = pendingCleanup.then(() => done);
     return done;
@@ -452,33 +403,35 @@ export function createDatabase(
     try {
       await applySessionSettings(conn.client);
     } catch (err) {
+      // A tunnel drop during setup has a transport diagnosis; surface it, else the original error.
+      const transport = conn.diagnose?.();
       await teardown(conn); // never throws, so the original setup error is preserved
-      throw err;
+      throw transport ?? err;
     }
     connection = conn;
     return conn.client;
   }
 
-  // True when the connection is left inside a transaction (open or aborted). Read from pg's local
-  // ReadyForQuery status - no round-trip; getTransactionStatus lags in @types/pg.
+  // Left inside a transaction (open or aborted), from pg's local ReadyForQuery status (no round-trip).
   function leftInTransaction(c: pg.Client): boolean {
     const status = (c as unknown as { getTransactionStatus(): string | null }).getTransactionStatus();
     return status === 'T' || status === 'E';
   }
 
-  // Run body on the client, serialized; pg errors become a typed failure. A call that left the
-  // connection in a transaction (e.g. a bare BEGIN) is discarded so it can't poison the next call.
+  // Run body serialized; pg errors become a typed failure. A call left in a transaction (a bare BEGIN) is discarded.
   async function run<T>(body: (c: pg.Client) => Promise<T>): Promise<Result<T>> {
     return serialized(async () => {
       let c: pg.Client;
       try {
         c = await getClient();
       } catch (err) {
-        return { ok: false, error: classifyPgError(err) };
+        return { ok: false, error: classifyError(err) };
       }
+      // getClient guarantees a live connection; prefer its transport diagnosis over pg's message.
+      const conn = connection as Connection;
       const result: Result<T> = await body(c).then(
         (data) => ({ ok: true, data }),
-        (err) => ({ ok: false, error: classifyPgError(err) })
+        (err) => ({ ok: false, error: classifyError(conn.diagnose?.() ?? err) })
       );
       if (connection !== null && connection.client === c && leftInTransaction(c)) {
         await discardConnection();
@@ -496,7 +449,6 @@ export function createDatabase(
 
   const guardFailure = (reason: string): Result<never> => ({ ok: false, error: { message: reason } });
 
-  // Idempotent.
   async function discardConnection(): Promise<void> {
     const conn = connection;
     connection = null;
@@ -541,8 +493,7 @@ export function createDatabase(
 
   return {
     query(sql, params) {
-      // Read-only mode wraps the read so the engine refuses any write; write mode trusts the role
-      // and sends it directly in one round-trip.
+      // Read-only wraps the read so the engine refuses any write; write mode sends it directly.
       return run(async (c) =>
         queryData(
           activeConfig.readOnly
@@ -553,8 +504,7 @@ export function createDatabase(
     },
 
     execute(sql, params) {
-      // Always registered for discoverability, but a write is refused here in read-only mode - the
-      // SQL never reaches the database.
+      // Registered for discoverability, but a write is refused here in read-only mode - the SQL never reaches the DB.
       if (activeConfig.readOnly) {
         return Promise.resolve(guardFailure('the server is read-only; set PG_ALLOW_WRITE=true to enable writes'));
       }
@@ -636,14 +586,13 @@ export function createDatabase(
         } catch (err) {
           activeConfig = previousConfig; // roll back so later calls retry the old target
           connection = null;
-          return { ok: false, error: classifyPgError(err) };
+          return { ok: false, error: classifyError(err) };
         }
       });
     },
 
     close() {
-      // Idempotent: close the current connection, then await any teardown the error handler started
-      // out of band, so the process never exits while a client or SSH tunnel is still closing.
+      // Idempotent: close the connection, then await any out-of-band teardown, so nothing exits mid-close.
       return serialized(async () => {
         await discardConnection();
         await pendingCleanup;
@@ -678,8 +627,7 @@ function reply<T>(result: Result<T>): ToolResult {
   return result.ok ? textResult(result.data) : errorResult(result.error);
 }
 
-// execute is always registered so writes are discoverable (it refuses in read-only mode); connect_db
-// is gated - an unregistered tool can't be called.
+// execute is always registered (refuses in read-only mode); connect_db is gated - an unregistered tool can't be called.
 function registerTools(server: McpServer, db: Database, config: ServerConfig): void {
   const capHint = `Prefer $1, $2 placeholders with the params array over interpolating values. Results are capped at ~${config.maxResultBytes} bytes; truncated:true means rows were dropped - add LIMIT/WHERE or select fewer columns.`;
   server.registerTool(
@@ -793,8 +741,7 @@ function registerTools(server: McpServer, db: Database, config: ServerConfig): v
   }
 }
 
-// MCP server over one database, plus an awaitable close() for both (server.close alone does not
-// await the db, so a caller could exit before the socket closes).
+// MCP server over one database, plus an awaitable close() for both (server.close alone doesn't await the db).
 export function createApp(
   config: ServerConfig,
   connector: Connector = defaultConnector
@@ -835,8 +782,7 @@ export interface ProcessLike {
 
 export async function main(proc: ProcessLike, transport: Transport): Promise<void> {
   const cfg = loadConfig(proc.env);
-  // Load the optional SSH connector (and its ssh2 dependency) only when configured, so the core
-  // never imports it. A direct connection uses the default.
+  // Load the optional SSH connector (and ssh2) only when configured; a direct connection uses the default.
   const connector = cfg.ssh ? (await import('./ssh-connector.js')).createSshConnector(cfg.ssh) : defaultConnector;
   const app = createApp(cfg, connector);
 
