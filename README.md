@@ -86,75 +86,8 @@ Alternatively, set the individual `PG_*` variables; they are used when
 | `PG_MAX_RESULT_BYTES` | `32768` | Byte budget for a `query` result sent to the model. Whole rows are kept while they fit; over the budget `returnedRows < rowCount` and `truncated: true` (if not even the first row fits, `returnedRows` is 0 with a hint). ~32 KiB ≈ 8k tokens; lower it for strict clients, raise it if your client allows more. |
 | `PG_STATEMENT_TIMEOUT` | `30000` | Statement timeout in milliseconds, applied to every session |
 | `PG_CONNECT_TIMEOUT` | `10000` | Timeout in milliseconds for a single connect attempt (raise it for slow links or SSH tunnels) |
-| `PG_SSH_HOST` | - | SSH bastion host. **Setting it enables tunneling**: the server reaches the database only through an SSH tunnel to this host (see below). Optional feature; needs the `ssh2` optional dependency. |
-| `PG_SSH_PORT` | `22` | SSH bastion port |
-| `PG_SSH_USER` | - | SSH username |
-| `PG_SSH_PRIVATE_KEY` | - | Path to a private key file. If unset, auth falls back like `ssh`: a running agent (`SSH_AUTH_SOCK`), then a default key (`~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa`) |
-| `PG_SSH_PASSPHRASE` | - | Passphrase for the private key, if encrypted |
-| `PG_SSH_AGENT` | - | `true` to use the ambient agent (`SSH_AUTH_SOCK`), or an explicit socket path / Windows named pipe (`\\.\pipe\openssh-ssh-agent`) |
-| `PG_SSH_PASSWORD` | - | SSH login password. Opt-in; a key or agent takes precedence. Prefer keys - a bastion often disables password auth. |
-| `PG_SSH_FINGERPRINT` | - | Pinned host-key fingerprint (`SHA256:...`). **Host-key verification is mandatory and set only this way**: without it the tunnel refuses to connect (fail-closed). Get it with `ssh-keygen -lF host` (reads your `known_hosts`) or `ssh-keyscan host \| ssh-keygen -lf -` (see the trust note below) |
-| `PG_SSH_KEEPALIVE_INTERVAL` | `15000` | SSH keepalive interval in ms; the tunnel drops after 3 unanswered keepalives, and the next call reconnects |
 
-### Connecting over an SSH tunnel
-
-Set `PG_SSH_HOST` (plus auth and host-key verification) to reach a database that is only accessible
-through a bastion. The connection string / `PG_*` fields then describe the database **as seen from the
-bastion**:
-
-```json
-{
-  "mcpServers": {
-    "postgres": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "mcp-postgres-server"],
-      "env": {
-        "DATABASE_URL": "postgres://mcp_readonly:secret@db.internal:5432/mydb?sslmode=verify-full",
-        "PG_SSH_HOST": "bastion.example.com",
-        "PG_SSH_USER": "jump",
-        "PG_SSH_PRIVATE_KEY": "/home/me/.ssh/id_ed25519",
-        "PG_SSH_FINGERPRINT": "SHA256:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-      }
-    }
-  }
-}
-```
-
-- **SSH changes only the transport.** Read-only enforcement, the result size cap, timeouts, and
-  `connect_db` behave exactly as on a direct connection, and no extra SQL is sent per query.
-- **Host-key verification is mandatory** via a pinned `PG_SSH_FINGERPRINT` - the tunnel will not
-  connect without it, so a man-in-the-middle bastion is refused. Get the fingerprint over a channel
-  you trust, most trustworthy first:
-  - on the bastion itself, or from its admin: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
-    (no network involved);
-  - from your existing `~/.ssh/known_hosts`, if you already reach the host over `ssh`:
-    `ssh-keygen -lF bastion.example.com`;
-  - fetched from the host: `ssh-keyscan bastion.example.com | ssh-keygen -lf -` (trust this only
-    when run from a network position you trust - it accepts whatever the host returns).
-- **TLS validates the real database hostname.** With `verify-full`, the certificate is checked against
-  the database's own hostname (e.g. `db.internal`), not the loopback the tunnel binds locally, and
-  `rejectUnauthorized` is pinned on so an inherited `NODE_TLS_REJECT_UNAUTHORIZED=0` cannot disable it.
-- **`ssh2` is an optional dependency**, loaded only when `PG_SSH_HOST` is set, so a direct connection
-  never initializes it. npm installs optional dependencies by default; run
-  `npm install --omit=optional` to skip it entirely (a direct connection does not need it).
-
-When a tunneled connection fails, the tool result carries a stable `code` (and, where the cause is
-determinate, a hint naming the setting to fix), so the failing phase is unambiguous:
-
-| code | meaning | first thing to check |
-|------|---------|----------------------|
-| `SSH_CONFIG_INVALID` | invalid SSH config, incl. a malformed `PG_SSH_FINGERPRINT` | the `PG_SSH_*` values |
-| `SSH_KEY_INVALID` | key unreadable, unparseable, a public key, or encrypted without the right passphrase (an encrypted key with the correct `PG_SSH_PASSPHRASE` works) | `PG_SSH_PRIVATE_KEY`, `PG_SSH_PASSPHRASE` |
-| `SSH_CONNECT_FAILED` | the bastion is unreachable, or SSH setup failed for an unclassified reason | `PG_SSH_HOST`, `PG_SSH_PORT`, reachability |
-| `SSH_TIMEOUT` | the bastion did not respond in time | network/firewall, `PG_CONNECT_TIMEOUT` |
-| `SSH_AUTH_FAILED` | the bastion rejected authentication | `PG_SSH_USER` and the key/agent/password in use |
-| `SSH_HOST_KEY_MISMATCH` | host key does not match `PG_SSH_FINGERPRINT` (stale value or MITM) | re-fetch the fingerprint (above) |
-| `SSH_FORWARD_FAILED` | tunnel is up, but the bastion could not reach the database | the DB host and port as seen from the bastion |
-| `SSH_CONNECTION_LOST` | an established tunnel dropped mid-session | transient; the next call reconnects |
-
-A genuine PostgreSQL error through a healthy tunnel keeps its own code (e.g. `28P01` for wrong
-database credentials), not an SSH code.
+To reach a database only accessible through a bastion, see [SSH tunneling](#ssh-tunneling) (adds `PG_SSH_*` variables).
 
 ### Example configurations
 
@@ -373,19 +306,95 @@ model from *writing* to your database; it does not stop prompt injection carried
 the row data a query returns. Don't point this server at production - use a replica,
 a snapshot, or a tightly scoped role. See [SECURITY.md](SECURITY.md).
 
+## SSH tunneling
+
+Set `PG_SSH_HOST` (plus auth and host-key verification) to reach a database that is only accessible
+through a bastion. The connection string / `PG_*` fields then describe the database **as seen from the
+bastion**:
+
+```json
+{
+  "mcpServers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-postgres-server"],
+      "env": {
+        "DATABASE_URL": "postgres://mcp_readonly:secret@db.internal:5432/mydb?sslmode=verify-full",
+        "PG_SSH_HOST": "bastion.example.com",
+        "PG_SSH_USER": "jump",
+        "PG_SSH_PRIVATE_KEY": "/home/me/.ssh/id_ed25519",
+        "PG_SSH_FINGERPRINT": "SHA256:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    }
+  }
+}
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PG_SSH_HOST` | - | SSH bastion host. **Setting it enables tunneling**: the server reaches the database only through an SSH tunnel to this host (see below). Optional feature; needs the `ssh2` optional dependency. |
+| `PG_SSH_PORT` | `22` | SSH bastion port |
+| `PG_SSH_USER` | - | SSH username |
+| `PG_SSH_PRIVATE_KEY` | - | Path to a private key file. If unset, auth falls back like `ssh`: a running agent (`SSH_AUTH_SOCK`), then a default key (`~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa`) |
+| `PG_SSH_PASSPHRASE` | - | Passphrase for the private key, if encrypted |
+| `PG_SSH_AGENT` | - | `true` to use the ambient agent (`SSH_AUTH_SOCK`), or an explicit socket path / Windows named pipe (`\\.\pipe\openssh-ssh-agent`) |
+| `PG_SSH_PASSWORD` | - | SSH login password. Opt-in; a key or agent takes precedence. Prefer keys - a bastion often disables password auth. |
+| `PG_SSH_FINGERPRINT` | - | Pinned host-key fingerprint (`SHA256:...`). **Host-key verification is mandatory and set only this way**: without it the tunnel refuses to connect (fail-closed). Get it with `ssh-keygen -lF host` (reads your `known_hosts`) or `ssh-keyscan host \| ssh-keygen -lf -` (see the trust note below) |
+| `PG_SSH_KEEPALIVE_INTERVAL` | `15000` | SSH keepalive interval in ms; the tunnel drops after 3 unanswered keepalives, and the next call reconnects |
+
+- **SSH changes only the transport.** Read-only enforcement, the result size cap, timeouts, and
+  `connect_db` behave exactly as on a direct connection, and no extra SQL is sent per query.
+- **Host-key verification is mandatory** via a pinned `PG_SSH_FINGERPRINT` - the tunnel will not
+  connect without it, so a man-in-the-middle bastion is refused. Get the fingerprint over a channel
+  you trust, most trustworthy first:
+  - on the bastion itself, or from its admin: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+    (no network involved);
+  - from your existing `~/.ssh/known_hosts`, if you already reach the host over `ssh`:
+    `ssh-keygen -lF bastion.example.com`;
+  - fetched from the host: `ssh-keyscan bastion.example.com | ssh-keygen -lf -` (trust this only
+    when run from a network position you trust - it accepts whatever the host returns).
+- **TLS validates the real database hostname.** With `verify-full`, the certificate is checked against
+  the database's own hostname (e.g. `db.internal`), not the loopback the tunnel binds locally, and
+  `rejectUnauthorized` is pinned on so an inherited `NODE_TLS_REJECT_UNAUTHORIZED=0` cannot disable it.
+- **`ssh2` is an optional dependency**, loaded only when `PG_SSH_HOST` is set, so a direct connection
+  never initializes it. npm installs optional dependencies by default; run
+  `npm install --omit=optional` to skip it entirely (a direct connection does not need it).
+
+A tunneled connection that fails reports a stable `SSH_*` code - see [Error Handling](#error-handling).
+
 ## Error Handling
 
 SQL and connection failures are returned as tool results (`isError: true`)
 with a message, the SQLSTATE code, and a hint. PostgreSQL's own server hint is
-used when present; otherwise these fallbacks apply - for example:
+used when present; otherwise these fallbacks apply:
 
-* `28P01` -> check `PG_USER`/`PG_PASSWORD`
-* `3D000` -> database does not exist, check `PG_DATABASE`
-* `42P01` -> relation not found, call `list_tables`
-* `42703` -> column not found, call `describe_table`
-* `57014` -> the query was canceled; if it hit `PG_STATEMENT_TIMEOUT`, add a `LIMIT` or simplify it
-* `25006` -> the transaction is read-only (its source may be a read-only role, a replica, a server default, or - for `query` - the read-only wrapper; `execute` writes need `PG_ALLOW_WRITE=true`)
-* `ECONNREFUSED`/`ENOTFOUND` -> check `PG_HOST`/`PG_PORT`/`DATABASE_URL`
+| code | meaning | first thing to check |
+|------|---------|----------------------|
+| `28P01` | authentication failed | `PG_USER` / `PG_PASSWORD` |
+| `3D000` | database does not exist | `PG_DATABASE` |
+| `42P01` | relation not found | call `list_tables` |
+| `42703` | column not found | call `describe_table` |
+| `57014` | the query was canceled (a timeout or a cancel request) | if timing out, add a `LIMIT` / simplify it, or raise `PG_STATEMENT_TIMEOUT` |
+| `25006` | the transaction is read-only | source may be a read-only role, a replica, a server default, or (for `query`) the read-only wrapper; `execute` writes need `PG_ALLOW_WRITE=true` |
+| `ECONNREFUSED` / `ENOTFOUND` | cannot reach or resolve the database host | `PG_HOST` / `PG_PORT` / `DATABASE_URL` |
+
+Over an [SSH tunnel](#ssh-tunneling), a failure carries a stable `code` (and, where
+the cause is determinate, a hint naming the setting to fix), so the failing phase is unambiguous:
+
+| code | meaning | first thing to check |
+|------|---------|----------------------|
+| `SSH_CONFIG_INVALID` | invalid SSH config, incl. a malformed `PG_SSH_FINGERPRINT` | the `PG_SSH_*` values |
+| `SSH_KEY_INVALID` | key unreadable, unparseable, a public key, or encrypted without the right passphrase (an encrypted key with the correct `PG_SSH_PASSPHRASE` works) | `PG_SSH_PRIVATE_KEY`, `PG_SSH_PASSPHRASE` |
+| `SSH_CONNECT_FAILED` | the bastion is unreachable, or SSH setup failed for an unclassified reason | `PG_SSH_HOST`, `PG_SSH_PORT`, reachability |
+| `SSH_TIMEOUT` | the bastion did not respond in time | network/firewall, `PG_CONNECT_TIMEOUT` |
+| `SSH_AUTH_FAILED` | the bastion rejected authentication | `PG_SSH_USER` and the key/agent/password in use |
+| `SSH_HOST_KEY_MISMATCH` | host key does not match `PG_SSH_FINGERPRINT` (stale value or MITM) | re-fetch the fingerprint |
+| `SSH_FORWARD_FAILED` | tunnel is up, but the bastion could not reach the database | the DB host and port as seen from the bastion |
+| `SSH_CONNECTION_LOST` | an established tunnel dropped mid-session | transient; the next call reconnects |
+
+A genuine PostgreSQL error through a healthy tunnel keeps its own code (e.g. `28P01` for wrong
+database credentials), not an SSH code.
 
 ## Migrating from 0.1.x
 
